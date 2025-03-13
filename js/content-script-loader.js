@@ -2,7 +2,11 @@
 
 (function () {
   function isExtensionContextValid() {
-    return typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id;
+    try {
+      return typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id;
+    } catch (e) {
+      return false;
+    }
   }
 
   window.urbanDictUtilsBridge = {
@@ -30,6 +34,27 @@
     isContextValid: function () {
       return isExtensionContextValid();
     },
+    
+    checkContextValidity: function() {
+      return new Promise((resolve) => {
+        if (!isExtensionContextValid()) {
+          resolve(false);
+          return;
+        }
+        
+        try {
+          chrome.runtime.sendMessage({action: "checkContextValid"}, (response) => {
+            if (chrome.runtime.lastError) {
+              resolve(false);
+            } else {
+              resolve(response && response.valid === true);
+            }
+          });
+        } catch (err) {
+          resolve(false);
+        }
+      });
+    }
   };
 
   if (isExtensionContextValid()) {

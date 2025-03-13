@@ -7,6 +7,8 @@ class DefinitionBubble {
     this.isDarkMode = false;
     this.isEnabled = true;
     this.localCache = new Map();
+    this.contextValid = true;
+    this.contextCheckTimestamp = 0;
 
     this.initializeBubble();
   }
@@ -139,6 +141,14 @@ class DefinitionBubble {
     const termLowercase = term.toLowerCase();
 
     try {
+      // just work please
+      const localCachedDefinition = this.localCache.get(termLowercase);
+      if (localCachedDefinition && localCachedDefinition.length > 0) {
+        this.displayDefinition(localCachedDefinition[0], contentElement);
+        return;
+      }
+      
+      // if this doesnt work i will cry
       let cachedDefinition = await this.getCachedDefinition(term);
 
       if (cachedDefinition && cachedDefinition.length > 0) {
@@ -169,6 +179,8 @@ class DefinitionBubble {
         return;
       }
 
+      this.localCache.set(termLowercase, data.list);
+      
       this.cacheDefinition(term, data.list);
 
       this.displayDefinition(data.list[0], contentElement);
@@ -184,35 +196,81 @@ class DefinitionBubble {
     }
   }
 
-  async getCachedDefinition(term) {
+  async checkExtensionContext() {
+    // I am tired boss
+    const now = Date.now();
+    if (now - this.contextCheckTimestamp < 30000 && this.contextCheckTimestamp > 0) {
+      return this.contextValid;
+    }
+    
+    this.contextCheckTimestamp = now;
+    
     try {
-      if (this.isExtensionContextValid()) {
+      if (window.urbanDictUtilsBridge && window.urbanDictUtilsBridge.isContextValid()) {
+        const response = await window.urbanDictUtilsBridge.sendRuntimeMessage({
+          action: "checkContextValid"
+        });
+        this.contextValid = response && response.valid === true;
+      } else if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+        const response = await this.sendRuntimeMessage({
+          action: "checkContextValid"
+        }).catch(() => ({ valid: false }));
+        this.contextValid = response && response.valid === true;
+      } else {
+        this.contextValid = false;
+      }
+    } catch (error) {
+      this.contextValid = false;
+      console.warn("Extension context check failed:", error);
+    }
+    
+    return this.contextValid;
+  }
+
+  isExtensionContextValid() {
+    // dont do this to me
+    return this.contextValid && 
+           ((typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) || 
+           (window.urbanDictUtilsBridge && window.urbanDictUtilsBridge.isContextValid()));
+  }
+
+  async getCachedDefinition(term) {
+    const termLower = term.toLowerCase();
+    const localCached = this.localCache.get(termLower);
+    if (localCached) {
+      return localCached;
+    }
+    
+    if (await this.checkExtensionContext()) {
+      try {
         const response = await this.sendRuntimeMessage({
           action: "getCachedDefinition",
           term,
         });
 
         if (response?.definitions) {
-          this.localCache.set(term.toLowerCase(), response.definitions);
+          this.localCache.set(termLower, response.definitions);
+          return response.definitions;
         }
-
-        return response?.definitions || null;
+      } catch (error) {
+        console.warn("Cache fetch failed:", error);
+        this.contextValid = false;
       }
-    } catch (error) {
-      console.warn("Cache fetch failed:", error);
     }
 
-    return this.localCache.get(term.toLowerCase()) || null;
-  }
-
-  isExtensionContextValid() {
-    return typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id;
+    return null;
   }
   // please work
   sendRuntimeMessage(message) {
     return new Promise((resolve, reject) => {
       try {
-        if (this.isExtensionContextValid()) {
+        if (window.urbanDictUtilsBridge) {
+          window.urbanDictUtilsBridge
+            .sendRuntimeMessage(message)
+            .then(resolve)
+            .catch(reject);
+        } 
+        else if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
           chrome.runtime.sendMessage(message, (response) => {
             if (chrome.runtime.lastError) {
               reject(chrome.runtime.lastError);
@@ -220,11 +278,6 @@ class DefinitionBubble {
               resolve(response);
             }
           });
-        } else if (window.urbanDictUtilsBridge) {
-          window.urbanDictUtilsBridge
-            .sendRuntimeMessage(message)
-            .then(resolve)
-            .catch(reject);
         } else {
           reject(new Error("Extension context is unavailable"));
         }
@@ -235,24 +288,22 @@ class DefinitionBubble {
   }
 
   cacheDefinition(term, definitions) {
-    try {
-      this.localCache.set(term.toLowerCase(), definitions);
+    const termLower = term.toLowerCase();
+    this.localCache.set(termLower, definitions);
 
-      if (this.isExtensionContextValid()) {
+    this.checkExtensionContext().then(isValid => {
+      if (isValid) {
         this.sendRuntimeMessage({
           action: "cacheDefinition",
           term,
           definitions,
         }).catch((error) => {
-          console.warn(
-            "Failed to cache definition in extension storage:",
-            error,
-          );
+          console.warn("Failed to cache definition in extension storage:", error);
+          this.contextValid = false;
         });
       }
-    } catch (error) {
-      console.warn("Failed to cache definition:", error);
-    }
+    }).catch(() => {
+    });
   }
 
   displayDefinition(definition, contentElement) {
